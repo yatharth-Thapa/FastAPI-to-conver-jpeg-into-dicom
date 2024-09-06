@@ -58,56 +58,39 @@ async def upload_dcm_files(token: Optional[str] = Header(None), data: PhotoLink 
     #     raise HTTPException(status_code=404, detail="Unauthenticated")
 
     try:
-        uploaded_results = []
+        # Fetch and convert all images into one DICOM file with multiple frames
+        dcm_content = await convert_multiple_images_to_dicom(data.urls, data)
+        print(dcm_content)
 
-        # Iterate over each URL and process the image
-        for url in data.urls:
-            # Fetch the image from the provided URL
-            response = requests.get(url)
+        # Send the generated DICOM file to the Orthanc server
+        orthanc_response = requests.post(
+            f"https://dev-pacs.smaro.app/orthanc/instances",
+            dcm_content,
+            headers={'Content-Type': 'application/octet-stream'},
+            auth=('orthanc', 'Orthanc@1234')
+        )
 
-            if response.status_code != 200:
-                raise HTTPException(status_code=404, detail=f"Image not found for URL: {url}")
+        if orthanc_response.status_code == 200:
+            orthanc_data = orthanc_response.json()
+            study = orthanc_data[0] if isinstance(orthanc_data, list) else orthanc_data
+            result = await fetch_study_id(Study(ParentStudy=study['ParentStudy']))
+
+            if not result:
+                raise HTTPException(status_code=404, detail="Not able to fetch the patient study for images")
             
-            # Convert the image bytes directly to DICOM
-            dcm_content = convert_jpg_to_dicom(response.content, data)
+            return {"status_code": 200, "data": result, "message": "Successfully uploaded all images"}
 
-            # Send the generated DICOM file to the Orthanc server
-            orthanc_response = requests.post(
-                f"https://dev-pacs.smaro.app/orthanc/instances",
-                dcm_content,
-                headers={'Content-Type': 'application/octet-stream'},
-                auth=('orthanc', 'Orthanc@1234')
-            )
-
-            if orthanc_response.status_code == 200:
-                orthanc_data = orthanc_response.json()
-                study = orthanc_data[0] if isinstance(orthanc_data, list) else orthanc_data
-                result = await fetch_study_id(Study(ParentStudy=study['ParentStudy']))
-
-                if not result:
-                    raise HTTPException(status_code=404, detail=f"Not able to fetch the patient study for image URL: {url}")
-                
-                uploaded_results.append({"url": url, "result": result})
-            else:
-                raise HTTPException(status_code=404, detail=f"Failed to upload the patient file for image URL: {url}")
-
-        return {"status_code": 200, "data": uploaded_results, "message": "Successfully uploaded all images"}
+        else:
+            raise HTTPException(status_code=404, detail="Failed to upload the patient file")
 
     except Exception as err:
         print(err)
         raise HTTPException(status_code=500, detail="Something went wrong, please try again later")
 
-def convert_jpg_to_dicom(image_bytes: bytes, data: PhotoLink = None) -> bytes:
+async def convert_multiple_images_to_dicom(image_urls: List[HttpUrl], data: PhotoLink = None) -> bytes:
     """
-    Converts a JPEG image (in bytes) to a DICOM file and returns it as bytes.
+    Converts multiple JPEG images to a single multi-frame DICOM file and returns it as bytes.
     """
-    # Open the JPEG image from bytes using Pillow
-    img = Image.open(io.BytesIO(image_bytes))
-    img = img.convert('L')  # Convert to grayscale
-
-    # Convert the image to a numpy array
-    np_img = np.array(img)
-
     # Create a DICOM dataset
     ds = Dataset()
 
@@ -121,20 +104,38 @@ def convert_jpg_to_dicom(image_bytes: bytes, data: PhotoLink = None) -> bytes:
     ds.SOPInstanceUID = generate_uid()
     ds.SOPClassUID = "1.2.840.10008.5.1.4.1.1.7"  # Secondary Capture Image Storage
     
-    #Filling in the date
+    # Filling in the date
     current_date = datetime.now().strftime('%Y%m%d')  # Format: YYYYMMDD
     ds.StudyDate = current_date
     ds.SeriesDate = current_date
     ds.AcquisitionDate = current_date
     ds.ContentDate = current_date
 
-    # Set the transfer syntax
-    ds.is_little_endian = True
-    ds.is_implicit_VR = True
+    # Collect pixel data from all images
+    pixel_data_list = []
 
-    # Set the image data
-    ds.PixelData = np_img.tobytes()
+    for url in image_urls:
+        response = requests.get(url)
+        if response.status_code != 200:
+            raise HTTPException(status_code=404, detail=f"Image not found for URL: {url}")
+        
+        # Open the JPEG image from bytes using Pillow
+        img = Image.open(io.BytesIO(response.content))
+        img = img.convert('L')  # Convert to grayscale
+
+        # Convert the image to a numpy array
+        np_img = np.array(img)
+
+        # Append to the pixel data list
+        pixel_data_list.append(np_img.tobytes())
+    
+    # Combine all frames into one byte string for multi-frame DICOM
+    combined_pixel_data = b''.join(pixel_data_list)
+
+    # Set the pixel data
+    ds.PixelData = combined_pixel_data
     ds.Rows, ds.Columns = np_img.shape
+    ds.NumberOfFrames = len(image_urls)
 
     # Set the necessary DICOM tags
     ds.SamplesPerPixel = 1
@@ -146,6 +147,10 @@ def convert_jpg_to_dicom(image_bytes: bytes, data: PhotoLink = None) -> bytes:
     ds.PixelRepresentation = 0
     ds.ImageType = ["ORIGINAL", "PRIMARY", "OTHER"]
 
+    # Set the transfer syntax
+    ds.is_little_endian = True
+    ds.is_implicit_VR = True
+
     # Save the DICOM file to a bytes buffer instead of a file
     dicom_bytes_io = io.BytesIO()
     ds.save_as(dicom_bytes_io)
@@ -153,7 +158,6 @@ def convert_jpg_to_dicom(image_bytes: bytes, data: PhotoLink = None) -> bytes:
     # Return the bytes
     dicom_bytes_io.seek(0)  # Go to the beginning of the BytesIO buffer
     return dicom_bytes_io.read()
-
 
 if __name__ == "__main__":
     import uvicorn
