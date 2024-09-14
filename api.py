@@ -10,8 +10,22 @@ import numpy as np
 from fastapi import FastAPI, HTTPException, Header
 from typing import Optional, List
 from datetime import datetime
-
+from fastapi.middleware.cors import CORSMiddleware
+import os
+from dotenv import load_dotenv
+ 
 app = FastAPI()
+# Add CORS middleware to allow cross-origin requests
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+load_dotenv()
+
+
 
 # AWS S3 Client configuration
 s3_client = boto3.client('s3')
@@ -30,7 +44,7 @@ class Study(BaseModel):
 async def fetch_study_id(study: Study):
     try:
         response = requests.get(
-            f"https://dev-pacs.smaro.app/orthanc/studies/{study.ParentStudy}",
+            f"{os.getenv("orthanc_URL")}/studies/{study.ParentStudy}",
             headers={'Content-Type': 'application/json'},
             auth=('orthanc', 'Orthanc@1234')
         )
@@ -60,11 +74,10 @@ async def upload_dcm_files(token: Optional[str] = Header(None), data: PhotoLink 
     try:
         # Fetch and convert all images into one DICOM file with multiple frames
         dcm_content = await convert_multiple_images_to_dicom(data.urls, data)
-        print(dcm_content)
 
         # Send the generated DICOM file to the Orthanc server
         orthanc_response = requests.post(
-            f"https://dev-pacs.smaro.app/orthanc/instances",
+            f"{os.getenv('orthanc_URL')}/instances",
             dcm_content,
             headers={'Content-Type': 'application/octet-stream'},
             auth=('orthanc', 'Orthanc@1234')
@@ -149,7 +162,7 @@ async def convert_multiple_images_to_dicom(image_urls: List[HttpUrl], data: Phot
 
     # Set the transfer syntax
     ds.is_little_endian = True
-    ds.is_implicit_VR = True
+    ds.is_implicit_VR = False
 
     # Save the DICOM file to a bytes buffer instead of a file
     dicom_bytes_io = io.BytesIO()
