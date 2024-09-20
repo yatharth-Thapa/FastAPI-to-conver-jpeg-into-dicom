@@ -13,6 +13,7 @@ from datetime import datetime
 from fastapi.middleware.cors import CORSMiddleware
 import os
 from dotenv import load_dotenv
+import time
  
 app = FastAPI()
 # Add CORS middleware to allow cross-origin requests
@@ -104,12 +105,16 @@ async def convert_multiple_images_to_dicom(image_urls: List[HttpUrl], data: Phot
     """
     Converts multiple JPEG images to a single multi-frame DICOM file and returns it as bytes.
     """
+    timestamp = str(time.time_ns())
+    # Take the last 6 digits of the timestamp
+    unique_id = timestamp[-6:]
     # Create a DICOM dataset
     ds = Dataset()
 
     # Fill in some required values
-    ds.patient_name = data.patientName
-    ds.gender = data.gender
+    ds.PatientName = data.patientName
+    ds.PatientID = unique_id
+    ds.PatientSex = data.gender
     ds.age = data.age
     ds.Modality = "OT"  # Other
     ds.StudyInstanceUID = generate_uid()
@@ -117,12 +122,10 @@ async def convert_multiple_images_to_dicom(image_urls: List[HttpUrl], data: Phot
     ds.SOPInstanceUID = generate_uid()
     ds.SOPClassUID = "1.2.840.10008.5.1.4.1.1.7"  # Secondary Capture Image Storage
     
+
+    
     # Filling in the date
-    current_date = datetime.now().strftime('%Y%m%d')  # Format: YYYYMMDD
-    ds.StudyDate = current_date
-    ds.SeriesDate = current_date
-    ds.AcquisitionDate = current_date
-    ds.ContentDate = current_date
+ 
 
     # Collect pixel data from all images
     pixel_data_list = []
